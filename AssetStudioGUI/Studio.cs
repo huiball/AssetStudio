@@ -9,6 +9,7 @@ using System.Windows.Forms;
 using AssetStudio;
 using static AssetStudioGUI.Exporter;
 using Object = AssetStudio.Object;
+using System.Runtime.Serialization.Formatters.Binary;
 
 namespace AssetStudioGUI
 {
@@ -26,6 +27,20 @@ namespace AssetStudioGUI
         public static List<AssetItem> exportableAssets = new List<AssetItem>();
         public static List<AssetItem> visibleAssets = new List<AssetItem>();
         internal static Action<string> StatusStripUpdate = x => { };
+
+        public class MeshTmpInfo
+        {
+            public Object m_object;
+            public string m_type;
+            public long m_size;
+
+            public MeshTmpInfo(Object obj, string type, long size)
+            {
+                m_object = obj;
+                m_type = type;
+                m_size = size;
+            }
+        }
 
         public static void ExtractFile(string[] fileNames)
         {
@@ -100,13 +115,31 @@ namespace AssetStudioGUI
         {
             StatusStripUpdate("Building asset list...");
 
+            string OutPutPath = "OutputResult";
+            if (Directory.Exists(OutPutPath) == false)
+            {
+                Directory.CreateDirectory(OutPutPath);
+            }
+            else
+            {
+                Directory.Delete(OutPutPath, true);
+                Directory.CreateDirectory(OutPutPath);
+            }
+
             productName = string.Empty;
             var assetsNameHash = new HashSet<string>();
             var progressCount = assetsManager.assetsFileList.Sum(x => x.Objects.Count);
             int j = 0;
             Progress.Reset();
+
+            var allAssetsInfoDic = new Dictionary<string, List<string>>();
+
             foreach (var assetsFile in assetsManager.assetsFileList)
             {
+                var assetsInfoList = new List<string>();
+                var meshTmpInfoList = new List<MeshTmpInfo>();
+                var fbxInfoDic = new Dictionary<Object, Object>();
+
                 var tempExportableAssets = new List<AssetItem>();
                 AssetBundle ab = null;
                 foreach (var asset in assetsFile.Objects.Values)
@@ -119,12 +152,34 @@ namespace AssetStudioGUI
                     {
                         case GameObject m_GameObject:
                             assetItem.Text = m_GameObject.m_Name;
+                            if (m_GameObject.m_MeshFilter != null)
+                            {
+                                if (m_GameObject.m_MeshFilter.m_Mesh.TryGet(out var m_Mesh))
+                                {
+                                    if (!fbxInfoDic.ContainsKey(m_Mesh))
+                                    {
+                                        fbxInfoDic.Add(m_Mesh, m_GameObject);
+                                    }
+                                }
+                            }
+
+                            if (m_GameObject.m_SkinnedMeshRenderer != null)
+                            {
+                                if (m_GameObject.m_SkinnedMeshRenderer.m_Mesh.TryGet(out var m_Mesh))
+                                {
+                                    if (!fbxInfoDic.ContainsKey(m_Mesh))
+                                    {
+                                        fbxInfoDic.Add(m_Mesh, m_GameObject);
+                                    }
+                                }
+                            }
                             break;
                         case Texture2D m_Texture2D:
                             if (!string.IsNullOrEmpty(m_Texture2D.m_StreamData?.path))
                                 assetItem.FullSize = asset.byteSize + m_Texture2D.m_StreamData.size;
                             assetItem.Text = m_Texture2D.m_Name;
                             exportable = true;
+                            assetsInfoList.Add(string.Format("{0}|{1}|{2}", assetItem.Text, assetItem.TypeString, assetItem.FullSize));
                             break;
                         case AudioClip m_AudioClip:
                             if (!string.IsNullOrEmpty(m_AudioClip.m_Source))
@@ -143,6 +198,10 @@ namespace AssetStudioGUI
                             exportable = true;
                             break;
                         case Mesh _:
+                            assetItem.Text = ((NamedObject)asset).m_Name;
+                            exportable = true;
+                            meshTmpInfoList.Add(new MeshTmpInfo(asset, assetItem.TypeString, assetItem.FullSize));
+                            break;
                         case TextAsset _:
                         case AnimationClip _:
                         case Font _:
@@ -150,6 +209,7 @@ namespace AssetStudioGUI
                         case Sprite _:
                             assetItem.Text = ((NamedObject)asset).m_Name;
                             exportable = true;
+                            assetsInfoList.Add(string.Format("{0}|{1}|{2}", assetItem.Text, assetItem.TypeString, assetItem.FullSize));
                             break;
                         case Animator m_Animator:
                             if (m_Animator.m_GameObject.TryGet(out var gameObject))
@@ -226,10 +286,84 @@ namespace AssetStudioGUI
                 }
                 exportableAssets.AddRange(tempExportableAssets);
                 tempExportableAssets.Clear();
+
+                if (meshTmpInfoList.Count > 0)
+                {
+                    var parentGameObjectInfoDic = new Dictionary<GameObject, MeshTmpInfo>();
+                    foreach (var meshTmpInfo in meshTmpInfoList)
+                    {
+                        Object fbxObj;
+                        if (fbxInfoDic.TryGetValue(meshTmpInfo.m_object, out fbxObj))
+                        {
+                            GameObject fbxGameObj = (GameObject)fbxObj;
+
+                            if (fbxGameObj.m_Transform.m_Father.TryGet(out var m_Father))
+                            {
+                                if (m_Father.m_GameObject.TryGet(out var parentGameObject))
+                                {
+                                    if (parentGameObjectInfoDic.ContainsKey(parentGameObject))
+                                    {
+                                        parentGameObjectInfoDic[parentGameObject].m_size += meshTmpInfo.m_size;
+                                    }
+                                    else
+                                    {
+                                        parentGameObjectInfoDic.Add(parentGameObject, new MeshTmpInfo(parentGameObject, meshTmpInfo.m_type, meshTmpInfo.m_size));
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                assetsInfoList.Add(string.Format("{0}|{1}|{2}", ((GameObject)fbxObj).m_Name, meshTmpInfo.m_type, meshTmpInfo.m_size));
+                            }
+                        }
+                        else
+                        {
+                            assetsInfoList.Add(string.Format("{0}|{1}|{2}", ((NamedObject)meshTmpInfo.m_object).m_Name, meshTmpInfo.m_type, meshTmpInfo.m_size));
+                        }
+                    }
+
+                    foreach (var parentInfo in parentGameObjectInfoDic)
+                    {
+                        GameObject parentObj = (GameObject)parentInfo.Value.m_object;
+                        assetsInfoList.Add(string.Format("{0}|{1}|{2}", parentObj.m_Name, parentInfo.Value.m_type, parentInfo.Value.m_size));
+                    }
+
+                }
+
+                if (assetsInfoList.Count > 0)
+                {
+                    string filePath = assetsFile.originalPath;
+                    filePath = filePath.Substring(filePath.LastIndexOf("\\") + 1);
+                    if (allAssetsInfoDic.ContainsKey(filePath))
+                    {
+                        List<string> infoList = allAssetsInfoDic[filePath];
+                        foreach (string info in assetsInfoList)
+                        {
+                            infoList.Add(info);
+                        }
+                    }
+                    else
+                    {
+                        allAssetsInfoDic.Add(filePath, assetsInfoList);
+                    }
+                }
             }
 
             visibleAssets = exportableAssets;
             assetsNameHash.Clear();
+
+            try
+            {
+                Stream stream = new FileStream(OutPutPath + "/AssetInfo.bin", FileMode.Create, FileAccess.ReadWrite);
+                BinaryFormatter binFormat = new BinaryFormatter();
+                binFormat.Serialize(stream, allAssetsInfoDic);
+                stream.Close();
+                stream.Dispose();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
         }
 
         public static List<TreeNode> BuildTreeStructure(Dictionary<Object, AssetItem> tempDic)
