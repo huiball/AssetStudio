@@ -1,4 +1,11 @@
+
+
+**增加输出bundle包内资源原始大小信息的功能，用于分析包体资源分布**
+
+
+
 # AssetStudio
+
 [![Build status](https://ci.appveyor.com/api/projects/status/rnu7l90422pdewx4?svg=true)](https://ci.appveyor.com/project/Perfare/assetstudio/branch/master/artifacts)
 
 **None of the repo, the tool, nor the repo owner is affiliated with, or sponsored or authorized by, Unity Technologies or its affiliates.**
